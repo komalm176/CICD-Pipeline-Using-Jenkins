@@ -5,3 +5,10 @@ commands:
 $body = '{"MessageId":"msg1","ConversationId":"conv1","Subject":"Test","SenderName":"John","SenderEmail":"john@test.com","HtmlBody":"<p>Hello</p>","ReceivedTimeUtc":"2026-04-13T14:00:00Z","Attachments":[]}'
 
 Invoke-RestMethod -Uri "http://localhost:7053/api/ProcessIncomingEmail" -Method POST -ContentType "application/json" -Body $body
+
+
+blob service client parser
+
+blobServiceClient = new BlobServiceClient(
+        "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+    );
