@@ -1,0 +1,99 @@
+using Azure.Messaging.ServiceBus;
+using EmailIngestionFunction.Logging;
+using EmailIngestionFunction.Models;
+using EmailIngestionFunction.Services;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Extensions.Logging;
+using System.Text.Json;
+
+namespace EmailIngestionFunction.Functions;
+
+/// <summary>
+/// Azure Service Bus-triggered Function that processes email metadata
+/// published by the Logic App after blob upload and virus scan initiation.
+/// </summary>
+public class ProcessIncomingEmailFunction
+{
+    private readonly ILogger<ProcessIncomingEmailFunction> _logger;
+    private readonly EmailProcessingService _emailProcessingService;
+
+    // Reuse JsonSerializerOptions across invocations
+    private static readonly JsonSerializerOptions JsonOptions = 
+        new() { PropertyNameCaseInsensitive = true };
+
+    public ProcessIncomingEmailFunction(
+        ILogger<ProcessIncomingEmailFunction> logger,
+        EmailProcessingService emailProcessingService)
+    {
+        _logger = logger;
+        _emailProcessingService = emailProcessingService;
+    }
+
+    /// <summary>
+    /// Entry point triggered by Azure Service Bus Queue.
+    /// Reads email metadata and blob path from the message,
+    /// checks virus scan result and routes accordingly.
+    /// </summary>
+    [Function("ProcessIncomingEmail")]
+    public async Task Run(
+        [ServiceBusTrigger(
+            "%ServiceBusQueueName%",
+            Connection = "ServiceBusConnection")] 
+        ServiceBusReceivedMessage message,
+        FunctionContext executionContext)
+    {
+        string functionId = executionContext.InvocationId.ToString();
+
+        _logger.LogInformation(
+            "Service Bus message received. MessageId={MessageId}, {Context}",
+            message.MessageId,
+            LogHelper.BuildContext(functionId, message.MessageId, null));
+
+        try
+        {
+            // Deserialize the message body into EmailPayload
+            string messageBody = message.Body.ToString();
+            EmailPayload? payload = JsonSerializer
+                .Deserialize<EmailPayload>(messageBody, JsonOptions);
+
+            // Validate payload
+            if (payload is null)
+            {
+                _logger.LogError(
+                    "Invalid message body — deserialization returned null. " +
+                    "MessageId={MessageId}", message.MessageId);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(payload.MessageId))
+            {
+                _logger.LogError("MessageId is required. Skipping message.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(payload.ConversationId))
+            {
+                _logger.LogError("ConversationId is required. Skipping message.");
+                return;
+            }
+
+            // Delegate to processing pipeline
+            EmailProcessingResult result = await _emailProcessingService
+                .ProcessAsync(payload, functionId);
+
+            _logger.LogInformation(
+                "Email processing completed. Success={Success}, " +
+                "Status={Status}, {Context}",
+                result.Success, result.Status,
+                LogHelper.BuildContext(functionId, 
+                    payload.MessageId, payload.ConversationId));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Unhandled exception in ProcessIncomingEmailFunction. " +
+                "RunID={FunctionId}", functionId);
+            throw; // Re-throw so Service Bus retries the message
+        }
+    }
+}
