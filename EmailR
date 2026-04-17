@@ -1,0 +1,29 @@
+/// <summary>
+/// Updates the email status for unexpected failures during processing.
+/// </summary>
+public async Task UpdateStatusAsync(
+    SqlConnection connection,
+    SqlTransaction transaction,
+    long id,
+    string emailStatus,
+    string? failureStage = null,
+    string? emailStatusReason = null)
+{
+    const string sql = @"
+        UPDATE dbo.EmailDocuments
+        SET EmailStatus = @EmailStatus,
+            FailureStage = @FailureStage,
+            EmailStatusReason = @EmailStatusReason,
+            UpdatedOnUtc = SYSUTCDATETIME()
+        WHERE Id = @Id;";
+
+    await using SqlCommand command = new(sql, connection, transaction);
+    command.Parameters.AddWithValue("@Id", id);
+    command.Parameters.AddWithValue("@EmailStatus", emailStatus);
+    command.Parameters.AddWithValue("@FailureStage", 
+        (object?)failureStage ?? DBNull.Value);
+    command.Parameters.AddWithValue("@EmailStatusReason", 
+        (object?)emailStatusReason ?? DBNull.Value);
+
+    await command.ExecuteNonQueryAsync();
+}
