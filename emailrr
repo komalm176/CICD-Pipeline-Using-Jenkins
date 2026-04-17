@@ -1,0 +1,85 @@
+using EmailIngestionFunction.Models;
+using Microsoft.Data.SqlClient;
+
+namespace EmailIngestionFunction.Repositories;
+
+/// <summary>
+/// Handles all SQL read and write operations for dbo.EmailDocuments table,
+/// including inserting new ingestion records and updating their processing status.
+/// </summary>
+public class EmailRepository
+{
+    /// <summary>
+    /// Inserts a new email ingestion record into dbo.EmailDocuments.
+    /// Status is determined by the processing pipeline result.
+    /// </summary>
+    public async Task<long> InsertReceivedAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        EmailIngestionRecord record)
+    {
+        const string sql = @"
+            INSERT INTO dbo.EmailDocuments
+            (FunctionId, MessageId, EmailSubject, SenderName,
+             SenderAddress, EmailBody, SendDateTime, BlobFolderPath, EmailStatus)
+            VALUES
+            (@FunctionId, @MessageId, @EmailSubject, @SenderName,
+             @SenderAddress, @EmailBody, @SendDateTime, @BlobFolderPath, @EmailStatus)
+            SELECT CAST(SCOPE_IDENTITY() AS BIGINT);";
+
+        await using SqlCommand command = new(sql, connection, transaction);
+
+        command.Parameters.AddWithValue("@FunctionId", record.FunctionId);
+        command.Parameters.AddWithValue("@MessageId", record.MessageId);
+        command.Parameters.AddWithValue("@EmailSubject",
+            (object?)record.EmailSubject ?? DBNull.Value);
+        command.Parameters.AddWithValue("@SenderName",
+            (object?)record.SenderName ?? DBNull.Value);
+        command.Parameters.AddWithValue("@SenderAddress",
+            (object?)record.SenderAddress ?? DBNull.Value);
+        command.Parameters.AddWithValue("@EmailBody",
+            (object?)record.EmailBody ?? DBNull.Value);
+        command.Parameters.AddWithValue("@SendDateTime", record.SendDateTime);
+        command.Parameters.AddWithValue("@BlobFolderPath",
+            (object?)record.BlobFolderPath ?? DBNull.Value);
+        command.Parameters.AddWithValue("@EmailStatus", record.EmailStatus);
+
+        object? result = await command.ExecuteScalarAsync();
+
+        if (result is null or DBNull)
+            throw new InvalidOperationException(
+                "INSERT into dbo.EmailDocuments did not return a generated ID.");
+
+        return Convert.ToInt64(result);
+    }
+
+    /// <summary>
+    /// Updates the email status for unexpected failures during processing.
+    /// </summary>
+    public async Task UpdateStatusAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        long id,
+        string emailStatus,
+        string? failureStage = null,
+        string? emailStatusReason = null)
+    {
+        const string sql = @"
+            UPDATE dbo.EmailDocuments
+            SET EmailStatus = @EmailStatus,
+                FailureStage = @FailureStage,
+                EmailStatusReason = @EmailStatusReason,
+                UpdatedOnUtc = SYSUTCDATETIME()
+            WHERE Id = @Id;";
+
+        await using SqlCommand command = new(sql, connection, transaction);
+        command.Parameters.AddWithValue("@Id", id);
+        command.Parameters.AddWithValue("@EmailStatus", emailStatus);
+        command.Parameters.AddWithValue("@FailureStage",
+            (object?)failureStage ?? DBNull.Value);
+        command.Parameters.AddWithValue("@EmailStatusReason",
+            (object?)emailStatusReason ?? DBNull.Value);
+
+        await command.ExecuteNonQueryAsync();
+    }
+}
