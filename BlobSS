@@ -1,0 +1,93 @@
+/// <summary>
+/// Retrieves the Microsoft Defender virus scan result from blob index tags.
+/// Returns "No threats found", "Malicious", or "Scanning" if not yet complete.
+/// </summary>
+/// <param name="blobFolderPath">Folder path containing the scanned blobs.</param>
+public async Task<string> GetScanResultAsync(
+    string blobFolderPath,
+    CancellationToken cancellationToken = default)
+{
+    // Get the first blob in the folder to check scan tags
+    await foreach (BlobItem blobItem in _containerClient
+        .GetBlobsAsync(prefix: blobFolderPath, 
+            cancellationToken: cancellationToken))
+    {
+        BlobClient blobClient = _containerClient
+            .GetBlobClient(blobItem.Name);
+        
+        Response<GetBlobTagsResult> tagsResponse = 
+            await blobClient.GetTagsAsync(
+                cancellationToken: cancellationToken);
+        
+        IDictionary<string, string> tags = tagsResponse.Value.Tags;
+
+        // Defender sets this tag after scanning
+        if (tags.TryGetValue(
+            "Malware Scanning scan result", out string? result))
+        {
+            return result; // "No threats found" or "Malicious"
+        }
+
+        // Tag not yet set — scan still in progress
+        return "Scanning";
+    }
+
+    // No blobs found in folder
+    return "Scanning";
+}
+
+/// <summary>
+/// Moves all blobs from a source container folder to a destination container.
+/// Used to route attachments based on virus scan result.
+/// </summary>
+/// <param name="blobFolderPath">Folder path to move.</param>
+/// <param name="sourceContainer">Source container name e.g. email-staging.</param>
+/// <param name="destinationContainer">Destination container name e.g. email-processed.</param>
+public async Task MoveBlobsAsync(
+    string blobFolderPath,
+    string sourceContainer,
+    string destinationContainer,
+    CancellationToken cancellationToken = default)
+{
+    BlobServiceClient blobServiceClient = 
+        _containerClient.GetParentBlobServiceClient();
+
+    BlobContainerClient sourceClient = 
+        blobServiceClient.GetBlobContainerClient(sourceContainer);
+    BlobContainerClient destClient = 
+        blobServiceClient.GetBlobContainerClient(destinationContainer);
+
+    // Ensure destination container exists
+    await destClient.CreateIfNotExistsAsync(
+        cancellationToken: cancellationToken);
+
+    // Copy each blob to destination then delete from source
+    await foreach (BlobItem blobItem in sourceClient
+        .GetBlobsAsync(prefix: blobFolderPath,
+            cancellationToken: cancellationToken))
+    {
+        BlobClient sourceBlob = sourceClient
+            .GetBlobClient(blobItem.Name);
+        BlobClient destBlob = destClient
+            .GetBlobClient(blobItem.Name);
+
+        // Copy blob to destination
+        await destBlob.StartCopyFromUriAsync(
+            sourceBlob.Uri, 
+            cancellationToken: cancellationToken);
+
+        // Delete from source after copy
+        await sourceBlob.DeleteAsync(
+            cancellationToken: cancellationToken);
+    }
+}
+Also need to update AppSettings.cs — add the new container names:
+public string BlobStagingContainer { get; set; } = "email-staging";
+public string BlobProcessedContainer { get; set; } = "email-processed";
+public string BlobQuarantineContainer { get; set; } = "email-quarantine";
+public string BlobScanPendingContainer { get; set; } = "email-scanpending";
+And in local.settings.json:
+"BlobStagingContainer": "email-staging",
+"BlobProcessedContainer": "email-processed",
+"BlobQuarantineContainer": "email-quarantine",
+"BlobScanPendingContainer": "email-scanpending"
