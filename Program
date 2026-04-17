@@ -1,0 +1,33 @@
+using EmailIngestionFunction.Configurations;
+using EmailIngestionFunction.Repositories;
+using EmailIngestionFunction.Services;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+var host = new HostBuilder()
+    .ConfigureFunctionsWorkerDefaults()
+    .ConfigureAppConfiguration((context, config) =>
+    {
+        // appsettings.json is optional — primary configuration comes from
+        // local.settings.json (local) or Azure App Settings (production)
+        config.AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+              .AddEnvironmentVariables();
+    })
+    .ConfigureServices((context, services) =>
+    {
+        // Bind the Values section of local.settings.json to AppSettings
+        services.Configure<AppSettings>(context.Configuration);
+
+        // Register core services as singletons
+        services.AddSingleton<BlobStorageService>();
+        services.AddSingleton<SqlService>();
+        services.AddSingleton<EmailRepository>();
+        services.AddSingleton<EmailProcessingService>();
+
+        // Wire up Application Insights telemetry
+        services.AddApplicationInsightsTelemetryWorkerService();
+    })
+    .Build();
+
+await host.RunAsync();
