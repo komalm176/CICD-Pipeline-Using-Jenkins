@@ -1,0 +1,236 @@
+/// <summary>
+/// Orchestrates email processing triggered by Service Bus message.
+/// Logic App has already uploaded attachments to email-staging container.
+/// This service checks virus scan results and routes accordingly.
+/// </summary>
+public class EmailProcessingService
+{
+    private readonly ILogger<EmailProcessingService> _logger;
+    private readonly EmailRepository _emailRepository;
+    private readonly BlobStorageService _blobStorageService;
+    private readonly SqlService _sqlService;
+
+    // Max retries for scan pending before giving up
+    private const int MaxScanRetries = 5;
+    private const int ScanRetryDelaySeconds = 10;
+
+    public EmailProcessingService(
+        BlobStorageService blobStorageService,
+        SqlService sqlService,
+        EmailRepository emailRepository,
+        ILogger<EmailProcessingService> logger)
+    {
+        _blobStorageService = blobStorageService;
+        _sqlService = sqlService;
+        _emailRepository = emailRepository;
+        _logger = logger;
+    }
+
+    public async Task<EmailProcessingResult> ProcessAsync(
+        EmailPayload payload,
+        string functionId,
+        CancellationToken cancellationToken = default)
+    {
+        string failureStage = ProcessingStatuses.Received;
+        long? emailIngestionId = null;
+        SqlConnection? connection = null;
+        string blobFolderPath = payload.BlobFolderPath; // comes from Logic App
+
+        try
+        {
+            // Stage 1: If no attachments → insert with MissingAttachment status
+            if (payload.Attachments is null || payload.Attachments.Count == 0)
+            {
+                _logger.LogInformation(
+                    "No attachments found. MessageId={MessageId}", 
+                    payload.MessageId);
+
+                await using SqlConnection conn = 
+                    await _sqlService.OpenConnectionAsync(cancellationToken);
+                await using SqlTransaction tx = 
+                    (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+                
+                emailIngestionId = await _emailRepository.InsertReceivedAsync(
+                    conn, tx, BuildRecord(payload, functionId, blobFolderPath,
+                    ProcessingStatuses.MissingAttachment));
+                await tx.CommitAsync(cancellationToken);
+
+                return new EmailProcessingResult
+                {
+                    Success = true,
+                    Status = ProcessingStatuses.MissingAttachment,
+                    BlobFolderPath = blobFolderPath,
+                    EmailIngestionId = emailIngestionId,
+                    FunctionId = functionId
+                };
+            }
+
+            // Stage 2: Check virus scan result with retries
+            failureStage = "VirusScan";
+            string scanResult = await GetScanResultWithRetryAsync(
+                blobFolderPath, payload, cancellationToken);
+
+            // Stage 3: Route based on scan result
+            failureStage = "BlobRouting";
+
+            if (scanResult == "No threats found")
+            {
+                // Move to email-processed container
+                await _blobStorageService.MoveBlobsAsync(
+                    blobFolderPath,
+                    "email-staging",
+                    "email-processed",
+                    cancellationToken);
+
+                // Insert SQL with ReadyForUpload status
+                await using SqlConnection conn =
+                    await _sqlService.OpenConnectionAsync(cancellationToken);
+                await using SqlTransaction tx =
+                    (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+                emailIngestionId = await _emailRepository.InsertReceivedAsync(
+                    conn, tx, BuildRecord(payload, functionId, blobFolderPath,
+                    ProcessingStatuses.ReadyForUpload));
+                await tx.CommitAsync(cancellationToken);
+
+                return new EmailProcessingResult
+                {
+                    Success = true,
+                    Status = ProcessingStatuses.ReadyForUpload,
+                    BlobFolderPath = blobFolderPath,
+                    EmailIngestionId = emailIngestionId,
+                    FunctionId = functionId
+                };
+            }
+            else if (scanResult == "Malicious")
+            {
+                // Move to email-quarantine container
+                await _blobStorageService.MoveBlobsAsync(
+                    blobFolderPath,
+                    "email-staging",
+                    "email-quarantine",
+                    cancellationToken);
+
+                // Insert SQL with Malicious status
+                await using SqlConnection conn =
+                    await _sqlService.OpenConnectionAsync(cancellationToken);
+                await using SqlTransaction tx =
+                    (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+                emailIngestionId = await _emailRepository.InsertReceivedAsync(
+                    conn, tx, BuildRecord(payload, functionId, blobFolderPath,
+                    ProcessingStatuses.Malicious));
+                await tx.CommitAsync(cancellationToken);
+
+                return new EmailProcessingResult
+                {
+                    Success = false,
+                    Status = ProcessingStatuses.Malicious,
+                    BlobFolderPath = blobFolderPath,
+                    EmailIngestionId = emailIngestionId,
+                    FunctionId = functionId
+                };
+            }
+            else
+            {
+                // ScanPending — move to email-scanpending container
+                await _blobStorageService.MoveBlobsAsync(
+                    blobFolderPath,
+                    "email-staging",
+                    "email-scanpending",
+                    cancellationToken);
+
+                await using SqlConnection conn =
+                    await _sqlService.OpenConnectionAsync(cancellationToken);
+                await using SqlTransaction tx =
+                    (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+                emailIngestionId = await _emailRepository.InsertReceivedAsync(
+                    conn, tx, BuildRecord(payload, functionId, blobFolderPath,
+                    ProcessingStatuses.ScanPending));
+                await tx.CommitAsync(cancellationToken);
+
+                return new EmailProcessingResult
+                {
+                    Success = false,
+                    Status = ProcessingStatuses.ScanPending,
+                    BlobFolderPath = blobFolderPath,
+                    EmailIngestionId = emailIngestionId,
+                    FunctionId = functionId
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Email processing failed. RunId={FunctionId}, " +
+                "MessageId={MessageId}, Stage={Stage}",
+                functionId, payload.MessageId, failureStage);
+
+            return new EmailProcessingResult
+            {
+                Success = false,
+                Status = ProcessingStatuses.Failed,
+                FailureStage = failureStage,
+                EmailStatusReason = ex.Message,
+                BlobFolderPath = blobFolderPath,
+                EmailIngestionId = emailIngestionId,
+                FunctionId = functionId
+            };
+        }
+    }
+
+    /// <summary>
+    /// Checks virus scan result from blob metadata with retries.
+    /// Returns scan result string or "ScanPending" after max retries.
+    /// </summary>
+    private async Task<string> GetScanResultWithRetryAsync(
+        string blobFolderPath,
+        EmailPayload payload,
+        CancellationToken cancellationToken)
+    {
+        for (int attempt = 1; attempt <= MaxScanRetries; attempt++)
+        {
+            string result = await _blobStorageService
+                .GetScanResultAsync(blobFolderPath, cancellationToken);
+
+            if (result == "No threats found" || result == "Malicious")
+            {
+                _logger.LogInformation(
+                    "Scan result: {Result}. MessageId={MessageId}, Attempt={Attempt}",
+                    result, payload.MessageId, attempt);
+                return result;
+            }
+
+            _logger.LogWarning(
+                "Scan pending. MessageId={MessageId}, Attempt={Attempt}/{Max}",
+                payload.MessageId, attempt, MaxScanRetries);
+
+            if (attempt < MaxScanRetries)
+                await Task.Delay(
+                    TimeSpan.FromSeconds(ScanRetryDelaySeconds), cancellationToken);
+        }
+
+        return "ScanPending";
+    }
+
+    /// <summary>
+    /// Builds an EmailIngestionRecord from the payload with given status.
+    /// </summary>
+    private static EmailIngestionRecord BuildRecord(
+        EmailPayload payload,
+        string functionId,
+        string blobFolderPath,
+        string status) => new()
+    {
+        FunctionId = functionId,
+        MessageId = payload.MessageId,
+        ConversationId = payload.ConversationId,
+        EmailSubject = payload.EmailSubject,
+        SenderName = payload.SenderName,
+        SenderAddress = payload.SenderAddress,
+        EmailBody = payload.EmailBody,
+        SendDateTime = payload.SendDateTime,
+        HasAttachments = payload.Attachments?.Count > 0,
+        AttachmentCount = payload.Attachments?.Count ?? 0,
+        BlobFolderPath = blobFolderPath,
+        EmailStatus = status
+    };
+}
