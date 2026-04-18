@@ -1,0 +1,168 @@
+Logic App:
+✅ Poll Inbox every 5 minutes
+✅ Top 50 unread emails (configurable)
+✅ Concurrency = 1
+✅ All senders
+✅ Extract email address only from From field
+✅ Null body → proceed normally
+✅ Large body → move to FailedEmails → Azure Monitor Critical
+✅ Attachment > 25MB → move to FailedEmails → Azure Monitor Critical
+✅ Sanitise MessageId (special chars → -)
+✅ Sanitise attachment filename (special chars → -)
+✅ Create staging folder → email-staging/{sanitisedMessageId}_{SendDateTimeUtc}/
+✅ Upload attachments → retry 3 times → fail → Azure Monitor Critical → move to FailedEmails
+✅ Send Service Bus message → retry 3 times → fail → Azure Monitor Critical → move to FailedEmails
+✅ Mark email as read after successful processing
+✅ No SQL dependency
+Logic App App Settings:
+Setting
+Value
+EmailPollCount
+50
+ServiceBusConnectionString
+<value>
+StorageConnectionString
+<value>
+StagingContainer
+email-staging
+ServiceBusQueueName
+<value>
+MaxAttachmentSizeMB
+25
+Function App:
+Status flow:
+Priority
+Condition
+Action
+DB Status
+Monitor Level
+1
+No path / empty folder
+Complete
+MissingAttachment
+Info
+2
+Staging container missing
+Dead-letter
+-
+Critical
+3
+MessageId null/empty
+Dead-letter
+-
+Critical
+4
+Any blob scanning < 3 retries
+Increment metadata, abandon
+No insert
+Info
+5
+Any blob scanning ≥ 3 retries
+Move ALL to scanpending
+ScanPending
+Critical
+6
+All scanned, any malicious
+Move ALL to quarantine
+Malicious
+Critical
+7
+All scanned, all clean
+Move ALL to processed, extract ZIPs
+ReadyForUpload
+Info
+8
+Blob move fails after 3 retries
+Rollback, dead-letter
+MoveFailed
+Critical
+9
+ZIP extraction fails
+Rollback, dead-letter
+MoveFailed
+Critical
+10
+SQL insert fails after 3 retries
+Dead-letter
+-
+Critical
+11
+Lock renewal fails
+Abort, rollback, redeliver
+-
+Critical
+Edge cases:
+✅ SQL fails after blobs moved → read DestinationContainer from blob metadata → check that container → re-insert DB
+✅ Metadata update fails → retry 3 times → dead-letter
+✅ Duplicate filenames → append -1, -2
+✅ SendDateTime missing → default DateTime.UtcNow
+✅ Duplicate MessageId → skip, complete message
+✅ After successful move → delete staging folder
+✅ Rollback failed → Critical Azure Monitor alert
+Function App App Settings:
+Setting
+Value
+AzureWebJobsStorage
+<value>
+SqlConnectionString
+<value>
+ServiceBusConnection
+<value>
+ServiceBusQueueName
+<value>
+MaxScanRetries
+3
+MaxMoveRetries
+3
+LockRenewalIntervalSeconds
+30
+ProcessedContainer
+email-processed
+QuarantineContainer
+email-quarantine
+ScanPendingContainer
+email-scanpending
+StagingContainer
+email-staging
+SQL:
+✅ EmailDocument table with full schema
+✅ Primary key on MessageId
+✅ Index on EmailStatus
+✅ Index on CreatedDateTime
+✅ Separate EmailProcessingErrors table removed — everything in EmailDocument
+EmailDocument statuses:
+Status
+Set By
+MissingAttachment
+Function App
+ScanPending
+Function App
+Malicious
+Function App
+ReadyForUpload
+Function App
+MoveFailed
+Function App
+Azure Monitor Critical alerts:
+✅ ScanPending
+✅ MoveFailed
+✅ Malicious
+✅ Rollback failed
+✅ Lock renewal failed
+✅ Staging container missing
+✅ SQL retry triggered
+✅ Logic App failures (body too large, attachment too large, blob upload failed, Service Bus send failed)
+✅ Service Bus DLQ depth > 0
+✅ Blob storage > 80% capacity
+✅ SQL connection failures
+✅ Function App not executing > 10 mins
+✅ Logic App not triggering > 15 mins
+✅ High malicious rate > 5 per hour
+Deliverables:
+✅ Logic App ARM template
+✅ EmailProcessorFunction.cs
+✅ Program.cs (dependency injection)
+✅ host.json
+✅ local.settings.json
+✅ SQL script (EmailDocument table + indexes)
+✅ README (deployment guide)
