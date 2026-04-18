@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logicAppName": {
+      "value": "email-processor-logic-app"
+    },
+    "location": {
+      "value": "eastus"
+    },
+    "office365ConnectionName": {
+      "value": "office365"
+    },
+    "serviceBusConnectionName": {
+      "value": "servicebus"
+    },
+    "azureBlobConnectionName": {
+      "value": "azureblob"
+    },
+    "serviceBusConnectionString": {
+      "value": "<YOUR-SERVICE-BUS-CONNECTION-STRING>"
+    },
+    "storageAccountName": {
+      "value": "<YOUR-STORAGE-ACCOUNT-NAME>"
+    },
+    "storageAccountKey": {
+      "value": "<YOUR-STORAGE-ACCOUNT-KEY>"
+    },
+    "emailPollCount": {
+      "value": 50
+    },
+    "maxAttachmentSizeMB": {
+      "value": 25
+    },
+    "stagingContainer": {
+      "value": "email-staging"
+    },
+    "serviceBusQueueName": {
+      "value": "<YOUR-SERVICE-BUS-QUEUE-NAME>"
+    },
+    "failedEmailsFolder": {
+      "value": "FailedEmails"
+    }
+  }
+}
